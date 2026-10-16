@@ -4,10 +4,10 @@ replicaCount: 2
 namespace: taskboard
 
 frontend:
-  image: ghcr.io/YOUR_ORG/taskboard-frontend
+  image: ghcr.io/Krisshank26/taskboard-frontend
 
 backend:
-  image: ghcr.io/YOUR_ORG/taskboard-backend
+  image: ghcr.io/Krisshank26/taskboard-backend
 
 # Image tags for the two application versions.
 blue:

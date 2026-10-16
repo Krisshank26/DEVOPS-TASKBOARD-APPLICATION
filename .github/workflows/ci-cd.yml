@@ -88,7 +88,7 @@ jobs:
           load: true
 
       - name: Scan backend
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0 
         with:
           image-ref: ${{ steps.images.outputs.backend }}:${{ github.sha }}
           severity: HIGH,CRITICAL
@@ -96,7 +96,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan frontend
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0 
         with:
           image-ref: ${{ steps.images.outputs.frontend }}:${{ github.sha }}
           severity: HIGH,CRITICAL
