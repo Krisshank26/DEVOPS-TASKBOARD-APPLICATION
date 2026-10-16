@@ -1,8 +1,8 @@
 activeColor: blue 
 frontend:
-  image: ghcr.io/Krisshank26/taskboard-frontend
+  image: ghcr.io/krisshank26/taskboard-frontend
 backend:
-  image: ghcr.io/Krisshank26/taskboard-backend
+  image: ghcr.io/krisshank26/taskboard-backend
 replicaCount: 2 
 
 blue: 
