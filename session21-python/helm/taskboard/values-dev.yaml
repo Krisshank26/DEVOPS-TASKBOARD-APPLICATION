@@ -1,0 +1,17 @@
+activeColor: blue 
+
+replicaCount: 1 
+
+blue: 
+  frontendTag: latest 
+  backendTag: latest 
+
+green: 
+  frontendTag: latest 
+  backendTag: latest 
+
+ingress:
+  enabled: true
+  host: taskboard.local
+hpa:
+  enabled: false

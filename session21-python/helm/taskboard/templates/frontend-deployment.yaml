@@ -1,0 +1,57 @@
+{{- $root := . }}
+{{ range $color := list "blue" "green" }}
+{{ $colorValues := index $root.Values $color }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "taskboard.fullname" $root }}-frontend-{{ $color }}
+  labels:
+    app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+    app.kubernetes.io/name: taskboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/color: {{ $color | quote }}
+spec:
+  replicas: {{ $root.Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+      app.kubernetes.io/name: taskboard
+      app.kubernetes.io/component: frontend
+      app.kubernetes.io/color: {{ $color | quote }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+        app.kubernetes.io/name: taskboard
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/color: {{ $color | quote }}
+    spec:
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: "{{ $root.Values.frontend.image }}:{{ $colorValues.frontendTag }}"
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+{{ end }} 

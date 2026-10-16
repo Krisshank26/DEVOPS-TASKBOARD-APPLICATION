@@ -1,0 +1,321 @@
+name: TaskBoard Python CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+        working-directory: backend
+
+      - name: Run backend tests
+        run: pytest -q
+        working-directory: backend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        run: helm lint ./helm/taskboard
+
+  build-scan-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Define image names
+        id: images
+        shell: bash
+        run: |
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "backend=${REGISTRY}/${OWNER_LC}/taskboard-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=${REGISTRY}/${OWNER_LC}/taskboard-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: ${{ steps.images.outputs.backend }}:${{ github.sha }}
+          load: true
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: ${{ steps.images.outputs.frontend }}:${{ github.sha }}
+          load: true
+
+      - name: Scan backend
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: ${{ steps.images.outputs.backend }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan frontend
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: ${{ steps.images.outputs.frontend }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Push images
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          docker push "${{ steps.images.outputs.backend }}:${GITHUB_SHA}"
+          docker push "${{ steps.images.outputs.frontend }}:${GITHUB_SHA}"
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-scan-push
+    runs-on: ubuntu-latest
+
+    environment: production
+
+    concurrency:
+      group: taskboard-production
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - uses: azure/setup-kubectl@v4
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG_DATA" | base64 --decode > "$HOME/.kube/config"
+          kubectl config current-context
+          kubectl get namespace taskboard
+
+      - name: Deploy candidate to inactive color
+        id: candidate
+        shell: bash
+        env:
+          BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/taskboard-backend
+          FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/taskboard-frontend
+        run: |
+          set -euo pipefail
+
+          RELEASE=taskboard
+          NAMESPACE=taskboard
+          CHART=./helm/taskboard
+          PROD_VALUES=./helm/taskboard/values-prod.yaml
+
+          RELEASE_EXISTS=false
+
+          if helm status "$RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+            CURRENT_VALUES="$(helm get values "$RELEASE" -n "$NAMESPACE" -o json)"
+
+            STORED_ACTIVE="$(jq -r '.activeColor // empty' <<< "$CURRENT_VALUES")"
+
+            if [[ "$STORED_ACTIVE" == "blue" || "$STORED_ACTIVE" == "green" ]]; then
+              ACTIVE_COLOR="$STORED_ACTIVE"
+
+              BLUE_FRONTEND_TAG="$(jq -r '.blue.frontendTag // .frontend.tag // "latest"' <<< "$CURRENT_VALUES")"
+              BLUE_BACKEND_TAG="$(jq -r '.blue.backendTag // .backend.tag // "latest"' <<< "$CURRENT_VALUES")"
+              GREEN_FRONTEND_TAG="$(jq -r '.green.frontendTag // "latest"' <<< "$CURRENT_VALUES")"
+              GREEN_BACKEND_TAG="$(jq -r '.green.backendTag // "latest"' <<< "$CURRENT_VALUES")"
+            else
+              # One-time migration from the old single-color Helm chart.
+              # Treat the existing version as Blue and deploy the candidate to Green.
+              ACTIVE_COLOR=blue
+
+              BLUE_FRONTEND_TAG="$(jq -r '.frontend.tag // "latest"' <<< "$CURRENT_VALUES")"
+              BLUE_BACKEND_TAG="$(jq -r '.backend.tag // "latest"' <<< "$CURRENT_VALUES")"
+              GREEN_FRONTEND_TAG="$GITHUB_SHA"
+              GREEN_BACKEND_TAG="$GITHUB_SHA"
+            fi
+
+            CURRENT_INGRESS="$(jq -r '.ingress.enabled // true' <<< "$CURRENT_VALUES")"
+
+            if [[ "$CURRENT_INGRESS" == "true" ]]; then
+              INGRESS_ARGS=(--set ingress.enabled=true)
+            else
+              # Preserve a disabled Ingress during an incomplete first installation.
+              INGRESS_ARGS=(--set ingress.enabled=false)
+            fi
+
+            REUSE_ARGS=(--reuse-values)
+          else
+            # First installation: create both colors, but expose no production Ingress yet.
+            ACTIVE_COLOR=blue
+            BLUE_FRONTEND_TAG="$GITHUB_SHA"
+            BLUE_BACKEND_TAG="$GITHUB_SHA"
+            GREEN_FRONTEND_TAG="$GITHUB_SHA"
+            GREEN_BACKEND_TAG="$GITHUB_SHA"
+
+            INGRESS_ARGS=(--set ingress.enabled=false)
+            REUSE_ARGS=()
+          fi
+
+          if [[ "$ACTIVE_COLOR" == "blue" ]]; then
+            TARGET_COLOR=green
+            GREEN_FRONTEND_TAG="$GITHUB_SHA"
+            GREEN_BACKEND_TAG="$GITHUB_SHA"
+          else
+            TARGET_COLOR=blue
+            BLUE_FRONTEND_TAG="$GITHUB_SHA"
+            BLUE_BACKEND_TAG="$GITHUB_SHA"
+          fi
+
+          echo "Current active color: $ACTIVE_COLOR"
+          echo "Candidate color: $TARGET_COLOR"
+
+          helm upgrade --install "$RELEASE" "$CHART" \
+            --namespace "$NAMESPACE" \
+            --create-namespace \
+            "${REUSE_ARGS[@]}" \
+            -f "$PROD_VALUES" \
+            --set-string "frontend.image=$FRONTEND_IMAGE" \
+            --set-string "backend.image=$BACKEND_IMAGE" \
+            --set-string "activeColor=$ACTIVE_COLOR" \
+            --set-string "blue.frontendTag=$BLUE_FRONTEND_TAG" \
+            --set-string "blue.backendTag=$BLUE_BACKEND_TAG" \
+            --set-string "green.frontendTag=$GREEN_FRONTEND_TAG" \
+            --set-string "green.backendTag=$GREEN_BACKEND_TAG" \
+            --set migrations.enabled=true \
+            --set-string "migrations.tag=$GITHUB_SHA" \
+            --set-string "migrations.revision=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "${INGRESS_ARGS[@]}" \
+            --wait \
+            --wait-for-jobs \
+            --timeout 10m
+
+          echo "active_color=$ACTIVE_COLOR" >> "$GITHUB_OUTPUT"
+          echo "target_color=$TARGET_COLOR" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for candidate Deployments
+        env:
+          CANDIDATE_COLOR: ${{ steps.candidate.outputs.target_color }}
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status \
+            "deployment/taskboard-taskboard-frontend-${CANDIDATE_COLOR}" \
+            -n taskboard --timeout=5m
+
+          kubectl rollout status \
+            "deployment/taskboard-taskboard-backend-${CANDIDATE_COLOR}" \
+            -n taskboard --timeout=5m
+
+      - name: Smoke-test candidate
+        env:
+          CANDIDATE_COLOR: ${{ steps.candidate.outputs.target_color }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl port-forward \
+            -n taskboard \
+            "svc/taskboard-taskboard-backend-${CANDIDATE_COLOR}" \
+            18000:8000 >/tmp/backend-port-forward.log 2>&1 &
+          BACKEND_PID=$!
+
+          kubectl port-forward \
+            -n taskboard \
+            "svc/taskboard-taskboard-frontend-${CANDIDATE_COLOR}" \
+            13000:80 >/tmp/frontend-port-forward.log 2>&1 &
+          FRONTEND_PID=$!
+
+          cleanup() {
+            kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          READY=false
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18000/ready >/dev/null 2>&1 \
+              && curl -fsS http://127.0.0.1:13000/ >/dev/null 2>&1; then
+              READY=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ "$READY" != "true" ]]; then
+            echo "Candidate frontend or backend did not become ready."
+            cat /tmp/backend-port-forward.log || true
+            cat /tmp/frontend-port-forward.log || true
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:18000/health
+          curl -fsS http://127.0.0.1:18000/ready
+          curl -fsS http://127.0.0.1:18000/api/tasks >/dev/null
+          curl -fsS http://127.0.0.1:13000/ >/dev/null
+
+          echo "Candidate smoke tests passed."
+
+      - name: Promote candidate to production
+        env:
+          CANDIDATE_COLOR: ${{ steps.candidate.outputs.target_color }}
+        run: |
+          set -euo pipefail
+
+          helm upgrade taskboard ./helm/taskboard \
+            --namespace taskboard \
+            --reuse-values \
+            --set-string "activeColor=${CANDIDATE_COLOR}" \
+            --set ingress.enabled=true \
+            --wait \
+            --timeout 5m
+
+          kubectl get ingress -n taskboard
+          kubectl get deployments,services -n taskboard

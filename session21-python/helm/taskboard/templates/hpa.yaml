@@ -1,0 +1,24 @@
+{{- if .Values.hpa.enabled }}
+{{- $root := . }}
+{{ range $color := list "blue" "green" }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "taskboard.fullname" $root }}-backend-{{ $color }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "taskboard.fullname" $root }}-backend-{{ $color }}
+  minReplicas: {{ $root.Values.hpa.minReplicas }}
+  maxReplicas: {{ $root.Values.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $root.Values.hpa.targetCPUUtilizationPercentage }}
+{{ end }}
+{{- end }} 

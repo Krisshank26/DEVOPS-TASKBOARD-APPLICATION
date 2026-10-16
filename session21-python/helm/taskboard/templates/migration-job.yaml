@@ -1,0 +1,55 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "taskboard.fullname" . }}-migration-{{ .Values.migrations.revision | toString | trunc 20 | trimSuffix "-" }}
+  labels:
+    app.kubernetes.io/name: taskboard
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskboard
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready \
+                -h {{ .Values.postgres.host | quote }} \
+                -p 5432 \
+                -U "$POSTGRES_USER" \
+                -d "$POSTGRES_DB"; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: taskboard-postgres
+                  key: username
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+
+      containers:
+        - name: migrate
+          image: "{{ .Values.backend.image }}:{{ .Values.migrations.tag }}"
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: DATABASE_URL
+              value: {{ printf "postgresql+psycopg://%s:%s@%s:5432/%s" .Values.postgres.username .Values.postgres.password .Values.postgres.host .Values.postgres.database | quote }}
+{{- end }}

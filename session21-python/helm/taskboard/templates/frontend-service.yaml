@@ -1,0 +1,23 @@
+{{ $root := . }}
+{{ range $color := list "blue" "green" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "taskboard.fullname" $root }}-frontend-{{ $color }}
+  labels:
+    app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+    app.kubernetes.io/name: taskboard
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+    app.kubernetes.io/name: taskboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/color: {{ $color | quote }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+{{ end }}

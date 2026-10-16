@@ -1,0 +1,20 @@
+activeColor: blue 
+frontend:
+  image: ghcr.io/Krisshank26/taskboard-frontend
+backend:
+  image: ghcr.io/Krisshank26/taskboard-backend
+replicaCount: 2 
+
+blue: 
+  frontendTag: "REPLACE_WITH_CURRENT_SHA" 
+  backendTag: "REPLACE_WITH_CURRENT_SHA" 
+
+green: 
+  frontendTag: "REPLACE_WITH_CANDIDATE_SHA" 
+  backendTag: "REPLACE_WITH_CANDIDATE_SHA" 
+
+ingress:
+  enabled: true
+  host: taskboard.example.com
+hpa: 
+  enabled: true
