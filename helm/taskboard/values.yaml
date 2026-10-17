@@ -23,8 +23,9 @@ imagePullSecrets: []
 postgres:
   host: taskboard-postgres
   database: taskboard
-  username: taskboard
-  password: taskboard 
+  username: taskboard 
+  existingSecret: taskboard-postgres-secret 
+  passwordKey: POSTGRES_PASSWORD 
 
 migrations: 
   enabled: true 
